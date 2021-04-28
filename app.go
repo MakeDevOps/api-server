@@ -13,6 +13,10 @@ import (
 	"strconv"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	_ "github.com/lib/pq"
@@ -82,6 +86,34 @@ func customerHandler(host, user, password, dbname string, port int) func(w http.
 	}
 }
 
+func namespaceHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		log.Printf("error getting in-cluster config: %s \n", err)
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Printf("error creating clientset: %s \n", err)
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	namespaces, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		log.Printf("error getting namespaces: %s \n", err)
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	json.NewEncoder(w).Encode(namespaces)
+}
+
 func main() {
 
 	viper.SetConfigName("config")            // name of config file (without extension)
@@ -114,6 +146,7 @@ func main() {
 	r.HandleFunc("/healthz", healthzHandler(host, user, password, dbname, port))
 	api := r.PathPrefix("/api/v1").Subrouter()
 	api.HandleFunc("/customers", customerHandler(host, user, password, dbname, port))
+	api.HandleFunc("/namespaces", namespaceHandler)
 
 	headersOk := handlers.AllowedHeaders([]string{"X-Requested-With", "Content-Type"})
 	originsOk := handlers.AllowedOrigins([]string{os.Getenv("ORIGIN_ALLOWED")})
