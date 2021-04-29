@@ -47,6 +47,45 @@ func healthzHandler(host, user, password, dbname string, port int) func(w http.R
 	}
 }
 
+func templatesHandler(host, user, password, dbname string, port int) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		psqlconn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable", host, port, user, password, dbname)
+		db, err := sql.Open("postgres", psqlconn)
+		if err != nil {
+			log.Printf("error connecting to database: %s \n", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		defer db.Close()
+		rows, err := db.Query(`SELECT "id", "template" FROM "templates"`)
+		if err != nil {
+			log.Printf("error connecting to database: %s \n", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		defer rows.Close()
+		var templates []map[string]string
+		for rows.Next() {
+			var id int
+			var template string
+
+			err = rows.Scan(&id, &template)
+			if err != nil {
+				log.Printf("error reading rows: %s \n", err)
+				http.Error(w, err.Error(), 500)
+				return
+			}
+			templates = append(templates, map[string]string{
+				"id":        strconv.Itoa(id),
+				"last_name": template,
+			})
+		}
+		json.NewEncoder(w).Encode(templates)
+	}
+}
+
 func customerHandler(host, user, password, dbname string, port int) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -74,7 +113,9 @@ func customerHandler(host, user, password, dbname string, port int) func(w http.
 
 			err = rows.Scan(&id, &lastName, &firstName)
 			if err != nil {
-
+				log.Printf("error reading rows: %s \n", err)
+				http.Error(w, err.Error(), 500)
+				return
 			}
 			customers = append(customers, map[string]string{
 				"id":         strconv.Itoa(id),
@@ -146,6 +187,7 @@ func main() {
 	r.HandleFunc("/healthz", healthzHandler(host, user, password, dbname, port))
 	api := r.PathPrefix("/api/v1").Subrouter()
 	api.HandleFunc("/customers", customerHandler(host, user, password, dbname, port))
+	api.HandleFunc("/templates", templatesHandler(host, user, password, dbname, port))
 	api.HandleFunc("/namespaces", namespaceHandler)
 
 	headersOk := handlers.AllowedHeaders([]string{"X-Requested-With", "Content-Type"})
