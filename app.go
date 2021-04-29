@@ -78,8 +78,8 @@ func templatesHandler(host, user, password, dbname string, port int) func(w http
 				return
 			}
 			templates = append(templates, map[string]string{
-				"id":        strconv.Itoa(id),
-				"last_name": template,
+				"id":       strconv.Itoa(id),
+				"template": template,
 			})
 		}
 		json.NewEncoder(w).Encode(templates)
