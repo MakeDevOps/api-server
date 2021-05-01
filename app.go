@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -16,6 +19,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+
+	"github.com/distribution/distribution/reference"
+	"github.com/distribution/distribution/registry/client"
+	"github.com/distribution/distribution/registry/client/auth"
+	"github.com/distribution/distribution/registry/client/transport"
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/registry"
+	"github.com/pkg/errors"
 
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
@@ -155,6 +166,129 @@ func namespaceHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(namespaces)
 }
 
+type existingTokenHandler struct {
+	token string
+}
+
+func (th *existingTokenHandler) AuthorizeRequest(req *http.Request, params map[string]string) error {
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", th.token))
+	return nil
+}
+
+func (th *existingTokenHandler) Scheme() string {
+	return "bearer"
+}
+
+func getHTTPTransport(authConfig types.AuthConfig, endpoint *url.URL, userAgent string) (http.RoundTripper, error) {
+	// get the http transport, this will be used in a client to upload manifest
+	base := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		Dial: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+			DualStack: true,
+		}).Dial,
+		TLSHandshakeTimeout: 10 * time.Second,
+		DisableKeepAlives:   true,
+	}
+
+	modifiers := []transport.RequestModifier{}
+	modifiers = append(modifiers, transport.NewHeaderRequestModifier(http.Header{
+		"User-Agent": []string{userAgent},
+	}))
+	authTransport := transport.NewTransport(base)
+	challengeManager, confirmedV2, err := registry.PingV2Registry(endpoint, authTransport)
+	if err != nil {
+		return nil, errors.Wrap(err, "error pinging v2 registry")
+	}
+	if !confirmedV2 {
+		return nil, fmt.Errorf("unsupported registry version")
+	}
+	if authConfig.RegistryToken != "" {
+		passThruTokenHandler := &existingTokenHandler{token: authConfig.RegistryToken}
+		modifiers = append(modifiers, auth.NewAuthorizer(challengeManager, passThruTokenHandler))
+	} else {
+		creds := registry.NewStaticCredentialStore(&authConfig)
+		// tokenHandler := auth.NewTokenHandler(authTransport, creds, "", "push", "pull")
+		basicHandler := auth.NewBasicHandler(creds)
+		modifiers = append(modifiers, auth.NewAuthorizer(challengeManager, basicHandler))
+	}
+	return transport.NewTransport(base, modifiers...), nil
+}
+
+func imagesHandler(registryUrl, username, password string) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		u, err := url.Parse(registryUrl)
+		if err != nil {
+			log.Printf("%s \n", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		httpTransport, err := getHTTPTransport(
+			types.AuthConfig{
+				Username: username,
+				Password: password,
+			},
+			u,
+			"makedevops")
+
+		if err != nil {
+			log.Printf("%s \n", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		reg, err := client.NewRegistry(registryUrl, httpTransport)
+		if err != nil {
+			log.Printf("error connecting to registry: %s \n", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		ctx := context.Background()
+
+		entries := make(map[string][]string)
+
+		for err = nil; err != io.EOF; {
+			_entries := make([]string, 10)
+			_, err = reg.Repositories(ctx, _entries, "")
+			if err != io.EOF {
+				log.Printf("Error getting repositories: %s \n", err)
+				http.Error(w, err.Error(), 500)
+				return
+			}
+			for _, i := range _entries {
+				if i != "" {
+					named, err := reference.WithName(i)
+					if err != nil {
+						log.Printf("Error parsing repository name: %s \n", err)
+						http.Error(w, err.Error(), 500)
+						return
+					}
+					repo, err := client.NewRepository(named, registryUrl, httpTransport)
+					if err != nil {
+						log.Printf("Error creating repository: %s \n", err)
+						http.Error(w, err.Error(), 500)
+						return
+					}
+					tags, err := repo.Tags(ctx).All(ctx)
+					if err != nil {
+						log.Printf("Error getting tags: %s \n", err)
+						http.Error(w, err.Error(), 500)
+						return
+					}
+					entries[i] = tags
+				}
+			}
+		}
+
+		json.NewEncoder(w).Encode(entries)
+	}
+}
+
 func main() {
 
 	viper.SetConfigName("config")            // name of config file (without extension)
@@ -178,6 +312,9 @@ func main() {
 	user := viper.GetString("pg_user")
 	password := viper.GetString("pg_password")
 	dbname := viper.GetString("pg_dbname")
+	resistryUrl := viper.GetString("registry_url")
+	registryUser := viper.GetString("registry_user")
+	registryPassword := viper.GetString("registry_password")
 
 	var wait time.Duration
 	flag.DurationVar(&wait, "graceful-timeout", time.Second*15, "the duration for which the server gracefully wait for existing connections to finish - e.g. 15s or 1m")
@@ -189,6 +326,7 @@ func main() {
 	api.HandleFunc("/customers", customerHandler(host, user, password, dbname, port))
 	api.HandleFunc("/templates", templatesHandler(host, user, password, dbname, port))
 	api.HandleFunc("/namespaces", namespaceHandler)
+	api.HandleFunc("/images", imagesHandler(resistryUrl, registryUser, registryPassword))
 
 	headersOk := handlers.AllowedHeaders([]string{"X-Requested-With", "Content-Type"})
 	originsOk := handlers.AllowedOrigins([]string{os.Getenv("ORIGIN_ALLOWED")})
