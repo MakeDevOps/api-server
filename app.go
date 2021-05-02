@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -14,11 +15,14 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"text/template"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "k8s.io/client-go/applyconfigurations/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/yaml"
 
 	"github.com/distribution/distribution/reference"
 	"github.com/distribution/distribution/registry/client"
@@ -164,6 +168,99 @@ func namespaceHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(namespaces)
+}
+func namespaceFromTemplateHandler(host, user, password, dbname string, port int) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		// get the template from the database
+		psqlconn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable", host, port, user, password, dbname)
+		db, err := sql.Open("postgres", psqlconn)
+		if err != nil {
+			log.Printf("error connecting to database: %s \n", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		defer db.Close()
+		row := db.QueryRow(`SELECT "template" FROM "templates" WHERE id = $1`, 1)
+		if err != nil {
+			log.Printf("error connecting to database: %s \n", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		var templ string
+
+		err = row.Scan(&templ)
+		if err != nil {
+			log.Printf("error reading row: %s \n", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		log.Printf("template: %s \n", templ)
+
+		var vars struct {
+			Vars map[string]string `json:"Vars"`
+		}
+
+		err = json.NewDecoder(r.Body).Decode(&vars)
+		if err != nil {
+			log.Printf("error decoding body %s \n", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		t, err := template.New("test").Parse(templ)
+		if err != nil {
+			log.Printf("error parsing template %s \n", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		var buf bytes.Buffer
+
+		err = t.Execute(&buf, vars)
+		if err != nil {
+			log.Printf("error executing template %s \n", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		ns := buf.String()
+		log.Printf("namespace: %s \n", ns)
+
+		var namespaceSpec v1.NamespaceApplyConfiguration
+		err = yaml.Unmarshal([]byte(ns), &namespaceSpec)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		log.Printf("%v", namespaceSpec)
+
+		config, err := rest.InClusterConfig()
+		if err != nil {
+			log.Printf("error getting in-cluster config: %s \n", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		clientset, err := kubernetes.NewForConfig(config)
+		if err != nil {
+			log.Printf("error creating clientset: %s \n", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		namespaces, err := clientset.CoreV1().Namespaces().Apply(context.TODO(), &namespaceSpec, metav1.ApplyOptions{FieldManager: "makedevops"})
+		if err != nil {
+			log.Printf("error getting namespaces: %s \n", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		json.NewEncoder(w).Encode(namespaces)
+	}
 }
 
 type existingTokenHandler struct {
@@ -325,7 +422,8 @@ func main() {
 	api := r.PathPrefix("/api/v1").Subrouter()
 	api.HandleFunc("/customers", customerHandler(host, user, password, dbname, port))
 	api.HandleFunc("/templates", templatesHandler(host, user, password, dbname, port))
-	api.HandleFunc("/namespaces", namespaceHandler)
+	api.HandleFunc("/namespaces", namespaceHandler).Methods("GET")
+	api.HandleFunc("/namespaces", namespaceFromTemplateHandler(host, user, password, dbname, port)).Methods("POST")
 	api.HandleFunc("/images", imagesHandler(resistryUrl, registryUser, registryPassword))
 
 	headersOk := handlers.AllowedHeaders([]string{"X-Requested-With", "Content-Type"})

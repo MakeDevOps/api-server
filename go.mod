@@ -19,6 +19,8 @@ require (
 	github.com/opencontainers/image-spec v1.0.1 // indirect
 	github.com/pkg/errors v0.9.1
 	github.com/spf13/viper v1.7.1
+	gopkg.in/yaml.v2 v2.4.0 // indirect
 	k8s.io/apimachinery v0.21.0
 	k8s.io/client-go v0.21.0
+	sigs.k8s.io/yaml v1.2.0 // indirect
 )
