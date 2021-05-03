@@ -59,6 +59,7 @@ func (a *App) Initialize(host, user, password, dbname string, port int) {
 func (a *App) initializeRoutes() {
 	a.Router.HandleFunc("/healthz", a.healthzHandler)
 	api := a.Router.PathPrefix("/api/v1").Subrouter()
+	api.HandleFunc("/applications", a.applicationHandler).Methods("GET")
 	api.HandleFunc("/customers", a.customerHandler)
 	api.HandleFunc("/templates", a.templatesHandler).Methods("GET")
 	api.HandleFunc("/templates", a.createTemplateHandler).Methods("POST")
@@ -198,6 +199,39 @@ func (a *App) templatesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondWithJSON(w, http.StatusOK, templates)
+}
+
+type application struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+func getApplications(db *sql.DB) ([]application, error) {
+	rows, err := db.Query(`SELECT "id", "name" FROM "applications"`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var applications []application
+	for rows.Next() {
+		var c application
+		err = rows.Scan(&c.ID, &c.Name)
+		if err != nil {
+			return nil, err
+		}
+		applications = append(applications, c)
+	}
+	return applications, nil
+}
+
+func (a *App) applicationHandler(w http.ResponseWriter, r *http.Request) {
+	applications, err := getApplications(a.DB)
+	if err != nil {
+		log.Printf("error getting applications: %s \n", err)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondWithJSON(w, http.StatusOK, applications)
 }
 
 type customer struct {
