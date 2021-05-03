@@ -108,18 +108,28 @@ func (a *App) Run(wait time.Duration) {
 	os.Exit(0)
 }
 
-func (a *App) healthzHandler(w http.ResponseWriter, r *http.Request) {
+func respondWithError(w http.ResponseWriter, code int, message string) {
+	respondWithJSON(w, code, map[string]string{"error": message})
+}
+
+func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+	response, _ := json.Marshal(payload)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.WriteHeader(code)
+	w.Write(response)
+}
 
+func (a *App) healthzHandler(w http.ResponseWriter, r *http.Request) {
 	err := a.DB.Ping()
 	if err != nil {
 		log.Printf("error communicating with database: %s \n", err)
-		json.NewEncoder(w).Encode(map[string]bool{"ok": false})
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	log.Println("Connected to db.")
-	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	respondWithJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 type template struct {
@@ -150,17 +160,13 @@ func getTemplates(db *sql.DB) ([]template, error) {
 }
 
 func (a *App) templatesHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
 	templates, err := getTemplates(a.DB)
 	if err != nil {
 		log.Printf("error getting templates: %s \n", err)
-		http.Error(w, err.Error(), 500)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	json.NewEncoder(w).Encode(templates)
+	respondWithJSON(w, http.StatusOK, templates)
 }
 
 type customer struct {
@@ -188,53 +194,43 @@ func getCustomers(db *sql.DB) ([]customer, error) {
 }
 
 func (a *App) customerHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
 	customers, err := getCustomers(a.DB)
 	if err != nil {
 		log.Printf("error getting customers: %s \n", err)
-		http.Error(w, err.Error(), 500)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	json.NewEncoder(w).Encode(customers)
+	respondWithJSON(w, http.StatusOK, customers)
 }
 
 func (a *App) namespaceHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		log.Printf("error getting in-cluster config: %s \n", err)
-		http.Error(w, err.Error(), 500)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		log.Printf("error creating clientset: %s \n", err)
-		http.Error(w, err.Error(), 500)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	namespaces, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		log.Printf("error getting namespaces: %s \n", err)
-		http.Error(w, err.Error(), 500)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	json.NewEncoder(w).Encode(namespaces)
+	respondWithJSON(w, http.StatusOK, namespaces)
 }
 func (a *App) namespaceFromTemplateHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
 	tmpl := template{ID: 1}
 	if err := tmpl.getTemplate(a.DB); err != nil {
 		log.Printf("error getting template %s \n", err)
-		http.Error(w, err.Error(), 500)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -247,14 +243,14 @@ func (a *App) namespaceFromTemplateHandler(w http.ResponseWriter, r *http.Reques
 	err := json.NewDecoder(r.Body).Decode(&vars)
 	if err != nil {
 		log.Printf("error decoding body %s \n", err)
-		http.Error(w, err.Error(), 500)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	t, err := _template.New("test").Parse(tmpl.Template)
 	if err != nil {
 		log.Printf("error parsing template %s \n", err)
-		http.Error(w, err.Error(), 500)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	var buf bytes.Buffer
@@ -262,7 +258,7 @@ func (a *App) namespaceFromTemplateHandler(w http.ResponseWriter, r *http.Reques
 	err = t.Execute(&buf, vars)
 	if err != nil {
 		log.Printf("error executing template %s \n", err)
-		http.Error(w, err.Error(), 500)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -272,7 +268,7 @@ func (a *App) namespaceFromTemplateHandler(w http.ResponseWriter, r *http.Reques
 	var namespaceSpec v1.NamespaceApplyConfiguration
 	err = yaml.Unmarshal([]byte(ns), &namespaceSpec)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		respondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -281,25 +277,24 @@ func (a *App) namespaceFromTemplateHandler(w http.ResponseWriter, r *http.Reques
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		log.Printf("error getting in-cluster config: %s \n", err)
-		http.Error(w, err.Error(), 500)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		log.Printf("error creating clientset: %s \n", err)
-		http.Error(w, err.Error(), 500)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	namespaces, err := clientset.CoreV1().Namespaces().Apply(context.TODO(), &namespaceSpec, metav1.ApplyOptions{FieldManager: "makedevops"})
 	if err != nil {
 		log.Printf("error getting namespaces: %s \n", err)
-		http.Error(w, err.Error(), 500)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	json.NewEncoder(w).Encode(namespaces)
+	respondWithJSON(w, http.StatusCreated, namespaces)
 }
 
 type existingTokenHandler struct {
@@ -359,13 +354,10 @@ type Registry struct {
 }
 
 func (a *App) imagesHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
 	u, err := url.Parse(a.Registry.registryUrl)
 	if err != nil {
 		log.Printf("%s \n", err)
-		http.Error(w, err.Error(), 500)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -379,14 +371,14 @@ func (a *App) imagesHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		log.Printf("%s \n", err)
-		http.Error(w, err.Error(), 500)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	reg, err := client.NewRegistry(a.Registry.registryUrl, httpTransport)
 	if err != nil {
 		log.Printf("error connecting to registry: %s \n", err)
-		http.Error(w, err.Error(), 500)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	ctx := context.Background()
@@ -398,7 +390,7 @@ func (a *App) imagesHandler(w http.ResponseWriter, r *http.Request) {
 		_, err = reg.Repositories(ctx, _entries, "")
 		if err != io.EOF {
 			log.Printf("Error getting repositories: %s \n", err)
-			http.Error(w, err.Error(), 500)
+			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		for _, i := range _entries {
@@ -406,19 +398,19 @@ func (a *App) imagesHandler(w http.ResponseWriter, r *http.Request) {
 				named, err := reference.WithName(i)
 				if err != nil {
 					log.Printf("Error parsing repository name: %s \n", err)
-					http.Error(w, err.Error(), 500)
+					respondWithError(w, http.StatusInternalServerError, err.Error())
 					return
 				}
 				repo, err := client.NewRepository(named, a.Registry.registryUrl, httpTransport)
 				if err != nil {
 					log.Printf("Error creating repository: %s \n", err)
-					http.Error(w, err.Error(), 500)
+					respondWithError(w, http.StatusInternalServerError, err.Error())
 					return
 				}
 				tags, err := repo.Tags(ctx).All(ctx)
 				if err != nil {
 					log.Printf("Error getting tags: %s \n", err)
-					http.Error(w, err.Error(), 500)
+					respondWithError(w, http.StatusInternalServerError, err.Error())
 					return
 				}
 				entries[i] = tags
@@ -426,7 +418,7 @@ func (a *App) imagesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	json.NewEncoder(w).Encode(entries)
+	respondWithJSON(w, http.StatusOK, entries)
 }
 
 func main() {
