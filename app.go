@@ -60,7 +60,8 @@ func (a *App) initializeRoutes() {
 	a.Router.HandleFunc("/healthz", a.healthzHandler)
 	api := a.Router.PathPrefix("/api/v1").Subrouter()
 	api.HandleFunc("/customers", a.customerHandler)
-	api.HandleFunc("/templates", a.templatesHandler)
+	api.HandleFunc("/templates", a.templatesHandler).Methods("GET")
+	api.HandleFunc("/templates", a.createTemplateHandler).Methods("POST")
 	api.HandleFunc("/namespaces", a.namespaceHandler).Methods("GET")
 	api.HandleFunc("/namespaces", a.namespaceFromTemplateHandler).Methods("POST")
 	api.HandleFunc("/images", a.imagesHandler)
@@ -141,6 +142,18 @@ func (t *template) getTemplate(db *sql.DB) error {
 	return db.QueryRow(`SELECT "template" FROM "templates" WHERE id = $1`, t.ID).Scan(&t.Template)
 }
 
+func (t *template) createTemplate(db *sql.DB) error {
+	err := db.QueryRow(
+		"INSERT INTO templates(template) VALUES($1) RETURNING id",
+		t.Template).Scan(&t.ID)
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func getTemplates(db *sql.DB) ([]template, error) {
 	rows, err := db.Query(`SELECT "id", "template" FROM "templates"`)
 	if err != nil {
@@ -157,6 +170,24 @@ func getTemplates(db *sql.DB) ([]template, error) {
 		templates = append(templates, t)
 	}
 	return templates, nil
+}
+
+func (a *App) createTemplateHandler(w http.ResponseWriter, r *http.Request) {
+	var t template
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&t); err != nil {
+		log.Printf("error decoding template: %s \n", err)
+		respondWithError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer r.Body.Close()
+
+	if err := t.createTemplate(a.DB); err != nil {
+		respondWithError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	respondWithJSON(w, http.StatusCreated, t)
 }
 
 func (a *App) templatesHandler(w http.ResponseWriter, r *http.Request) {
